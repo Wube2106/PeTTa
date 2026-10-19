@@ -50,7 +50,7 @@ translate_clause(Input, Clause, ConstrainArgs, Dependencies) :-
         analysis_reemit_proof(Proof).
 
 with_compiling_caller(F, N, Goal) :-
-    ( catch(b_getval('$compiling_caller', Previous), _, fail) -> true ; Previous = none ),
+    ( nb_current('$compiling_caller', Previous) -> true ; Previous = none ),
     setup_call_cleanup(b_setval('$compiling_caller', F/N),
                        Goal,
                        b_setval('$compiling_caller', Previous)).
@@ -58,13 +58,13 @@ with_compiling_caller(F, N, Goal) :-
 %The clause whose body is being translated, for analyses that read the body's
 %determinism context (committed_call_site/2):
 with_compiling_clause(F, Params, Body, Goal) :-
-    catch(b_getval('$compiling_clause', Previous), _, Previous = none),
+    ( nb_current('$compiling_clause', Previous) -> true ; Previous = none ),
     setup_call_cleanup(b_setval('$compiling_clause', clause(F, Params, Body)),
                        Goal,
                        b_setval('$compiling_clause', Previous)).
 
 current_compiling_caller(F, N) :-
-    catch(b_getval('$compiling_caller', F/N), _, fail).
+    nb_current('$compiling_caller', F/N).
 translate_clause_core(Input, (Head :- BodyConj), ConstrainArgs) :-
                                                Input = [=, [F|Args0], BodyExpr],
                                                length(Args0, SourceArity),
@@ -80,7 +80,7 @@ translate_clause_core(Input, (Head :- BodyConj), ConstrainArgs) :-
                                                %support selection or coverage proofs:
                                                ( GoalsPrefix == [] -> HeadForm = clean
                                                ; HeadForm = head_goals ),
-                                               catch(nb_getval(F, Prev), _, Prev = []),
+                                               ( atom(F), nb_current(F, Prev) -> true ; Prev = [] ),
                                                nb_setval(F, [fun_meta(Args1, BodyExpr, HeadForm) | Prev]),
                                                clause_param_types(F, Args1, DeclOut),
                                                %Snapshot the declared arg positions that stay bare type variables after
@@ -178,7 +178,7 @@ clause_commit_cut(F, Args) :- \+ suppress_det_cut(true),
                               catch(( fn_determinism(F, N, D), committed_det(D) ), _, fail).
 
 function_has_conditional_commit(F, N) :-
-    catch(nb_getval(F, Metas), _, fail),
+    atom(F), nb_current(F, Metas),
     member(Meta, Metas),
     Meta = fun_meta(Args, Body, _),
     length(Args, N),
@@ -201,7 +201,7 @@ recompile_function_clauses(F) :-
         fail ) ).
 
 snapshot_recompile_state(F, recompile_state(Metas, Provisos, Inferred)) :-
-    ( catch(nb_getval(F, Metas0), _, fail) -> Metas = Metas0 ; Metas = '$absent' ),
+    ( atom(F), nb_current(F, Metas0) -> Metas = Metas0 ; Metas = '$absent' ),
     findall(proviso(N, Pos, Kind),
             det_bound_proviso(F, N, Pos, Kind),
             Provisos),
@@ -733,8 +733,7 @@ translate_expr([H0|T0], Expectation, Goals, Out) :-
                                                        translate_case(NormalCases, Kv, Expectation, Out, CaseGoal, KeyGoal),
                                                        translate_expr_to_conj(DefaultExpr, Expectation, ConD, DOut),
                                                        build_branch(ConD, DOut, Out, DefaultThen),
-                                                       Combined = ( (GkConj, CaseGoal) ;
-                                                                    \+ GkConj, DefaultThen ),
+                                                       case_with_empty(GkConj, CaseGoal, DefaultThen, Combined),
                                                        append([GsH, KeyGoal, [Combined]], Goals)
                                                      ; translate_expr(KeyExpr, Gk, Kv),
                                                        translate_case(PairsExpr, Kv, Expectation, Out, IfGoal, KeyGoal),
@@ -1378,7 +1377,7 @@ cmp_native('!=', A, B, (A \== B)).
 %source expressions where the caller has them, otherwise the values AVs.
 build_call_or_partial(Fun, Src, AVs, Out, Inner, Extra, Goals) :- ( maybe_specialize_call(Fun, AVs, Out, Goal)
                                                                     -> commit_call(Fun, Src, AVs, Out, Goal, Goal1),
-                                                                       append(Inner, [catch(call(Goal1), _, fail)|Extra], Goals)
+                                                                       append(Inner, [Goal1|Extra], Goals)
                                                                      ; build_direct_call(Fun, Src, AVs, Out, Inner, Extra, Goals) ).
 
 build_direct_call(Fun, Src, AVs, Out, Inner, Extra, Goals) :- length(AVs, N),
@@ -1458,6 +1457,14 @@ build_isolated_branch(Con, Val, Out, Goal) :-
          ( Con == true -> Goal = (Out = Val)
          ; Goal = (Con, Out = Val) )
     ; build_branch(Con, Val, Out, Goal) ).
+
+%The key of a case with an Empty case runs once, and Empty only if the key yields no value. Soft-cut does exactly
+%this, but would make a cut inside the key local to it; so a key containing a cut instead records in a fresh
+%non-backtrackable flag whether it yielded a value, and its cut still commits the clause:
+case_with_empty(GkConj, CaseGoal, DefaultThen, ( GkConj *-> CaseGoal ; DefaultThen )) :- \+ ( sub_term(G, GkConj), G == ! ), !.
+case_with_empty(GkConj, CaseGoal, DefaultThen, ( functor(Seen, seen, 1),
+                                                 ( GkConj, nb_setarg(1, Seen, true), CaseGoal
+                                                 ; arg(1, Seen, S), var(S), DefaultThen ) )).
 
 % An if join is a choice flow, not a binding flow (note_candidates/2 would
 % specialize Out's open candidate): route the candidates through a fresh
@@ -1546,7 +1553,7 @@ memberchk_eq(V, [H|_]) :- V == H, !.
 memberchk_eq(V, [_|T]) :- memberchk_eq(V, T).
 
 %Generate readable lambda name:
-next_lambda_name(Name) :- ( catch(nb_getval(lambda_counter, Prev), _, Prev = 0) ),
+next_lambda_name(Name) :- ( nb_current(lambda_counter, Prev) -> true ; Prev = 0 ),
                           N is Prev + 1,
                           nb_setval(lambda_counter, N),
                           format(atom(Name), 'lambda_~d', [N]).

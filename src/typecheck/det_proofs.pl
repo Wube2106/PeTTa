@@ -355,12 +355,12 @@ covers_all_nonempty_lists(P) :- nonvar(P), P = [H|Tl], var(H), var(Tl).
 
 %Variables proven nonempty on the current analysis path, scoped by b_setval
 %and compared by identity (they are the shared body variables).
-with_nonempty_var(V, Goal) :- catch(b_getval('$nonempty_vars', Saved), _, Saved = []),
+with_nonempty_var(V, Goal) :- ( nb_current('$nonempty_vars', Saved) -> true ; Saved = [] ),
                               setup_call_cleanup(b_setval('$nonempty_vars', [V|Saved]),
                                                  Goal,
                                                  b_setval('$nonempty_vars', Saved)).
 
-nonempty_var(V) :- catch(b_getval('$nonempty_vars', Vs), _, fail), member(X, Vs), X == V, !.
+nonempty_var(V) :- nb_current('$nonempty_vars', Vs), member(X, Vs), X == V, !.
 
 %(== V ()) or (== () V) with V a variable whose known type is a (List _). The
 %empty literal () is the empty Prolog list here; == is the structural test the
@@ -539,6 +539,10 @@ output_cert_proof(Kind, F, N, Proof) :-
                         [output_cert(Kind, F/N)|Dependencies], Proof),
     analysis_cache_store(output(Kind, F, N), Proof).
 
+%The stack `top` marks a query from outside any certificate proof, which
+%takes the memoized certificate.
+output_cert_core(Kind, F, N, top, Verdict, []) :- !,
+    ( output_cert(Kind, F, N) -> Verdict = yes ; Verdict = no ).
 output_cert_core(Kind, F, N, Stack, yes, [output_cert(Kind, F/N)]) :-
     memberchk(c(Kind, F, N), Stack), !.
 output_cert_core(Kind, F, N, Stack, Verdict, Dependencies) :-
@@ -558,7 +562,7 @@ output_cert_core(Kind, F, N, Stack, Verdict, Dependencies) :-
 :- dynamic pending_clause_body/4.   % pending_clause_body(File, F, N, Body)
 
 cert_clause_bodies(F, N, Bodies) :-
-    findall(B, ( catch(nb_getval(F, Ms), _, fail),
+    findall(B, ( atom(F), nb_current(F, Ms),
                  member(Meta, Ms),
                  Meta = fun_meta(As, B, _),
                  length(As, N) ), Rs),
@@ -624,26 +628,10 @@ bool_logic_builtin(implies).
 
 cert_bool_args([], _, yes, []).
 cert_bool_args([A|As], Stack, Verdict, Dependencies) :-
-    cert_bool_value(A, Stack, Here, HereDeps),
+    clause_result_bool_core(A, Stack, Here, HereDeps),
     cert_bool_args(As, Stack, Rest, RestDeps),
     ( Here == yes, Rest == yes -> Verdict = yes ; Verdict = no ),
     append(HereDeps, RestDeps, Dependencies).
-
-cert_bool_value(A, _, yes, []) :- ( A == true ; A == false ), !.
-cert_bool_value(A, Stack, Verdict, Dependencies) :-
-    nonvar(A), A = [F|Args], atom(F), bool_logic_builtin(F), !,
-    cert_bool_args(Args, Stack, Verdict, Dependencies).
-cert_bool_value(A, _, yes, [effect(F/N), decl(F/N)]) :-
-    nonvar(A), A = [F|Args], atom(F), is_list(Args), length(Args, N),
-    \+ bool_logic_builtin(F),
-    ( builtin_call_determinism_args(F, N, Args, det)
-    ; builtin_flat_cardinality(F, N, det) ),
-    unique_fn_decl(F, N, _, OT1), OT1 == 'Bool', !.
-cert_bool_value(A, Stack, Verdict, Dependencies) :-
-    nonvar(A), A = [G|GArgs], atom(G), is_list(GArgs), !,
-    length(GArgs, N),
-    output_cert_core(bound_bool, G, N, Stack, Verdict, Dependencies).
-cert_bool_value(_, _, no, []).
 
 clause_result_proper_list_core(Body, _, yes, []) :-
     nonvar(Body), Body = [Hd|Rest], nonvar(Hd), Hd == collapse,
@@ -659,28 +647,15 @@ clause_result_proper_list_core(Body, Stack, Verdict, Dependencies) :-
     output_cert_core(proper_list, G, N, Stack, Verdict, Dependencies).
 clause_result_proper_list_core(_, _, no, []).
 
-%A clause body whose RESULT is provably a bound proper list. Every test here is
-%NON-BINDING (nonvar guards + ==): Body is the SHARED clause body term that
-%translate_expr/3 compiles next, so unifying a pattern into it - e.g. matching a
-%var-headed application ($f $x) against [collapse, _] - would bind the clause's
-%own variables and corrupt the compile.
-clause_result_proper_list(Body) :- nonvar(Body), Body = [Hd|Rest], nonvar(Hd), Hd == collapse,
-                                   Rest = [_], !.
-%SWI list_to_set/2 always constructs a closed output list whenever it returns;
-%the input may affect success/error behavior, never the result spine.
-clause_result_proper_list(Body) :- nonvar(Body), Body = [F, _],
-                                   F == list_to_set, !.
-clause_result_proper_list(Body) :- proper_list_literal_spine(Body), !.
-%recursive, same-file only: a call to an already-certified function. A data
-%atom head is handled by proper_list_literal_spine above (data_headed), so this
-%reaches only a genuine function application:
-clause_result_proper_list(Body) :- nonvar(Body), Body = [G|GArgs], atom(G),
-                                   \+ ( G == cons ; G == 'cons-atom' ),
-                                   length(GArgs, N), proper_list_output(G, N).
-
-%Also used by let_determinism/4: such a let value makes the bound variable a
-%proper list, so (== $v ()) can narrow it.
-val_guaranteed_proper_list(Val) :- clause_result_proper_list(Val).
+%A clause body whose RESULT is provably a bound proper list, outside any
+%certificate proof: calls are judged by their cached certificates. Every
+%test is NON-BINDING (nonvar guards + ==): Body is the SHARED clause body term
+%that translate_expr/3 compiles next, so unifying a pattern into it - e.g.
+%matching a var-headed application ($f $x) against [collapse, _] - would bind
+%the clause's own variables and corrupt the compile.
+%let_determinism/4 uses it: such a let value makes the bound variable a proper
+%list, so (== $v ()) can narrow it.
+clause_result_proper_list(Body) :- clause_result_proper_list_core(Body, top, yes, _).
 
 %A literal proper-list spine, built at the clause site: the empty list, a
 %data-headed list literal, or a cons onto a literal spine. Mirrors
@@ -729,19 +704,19 @@ body_determinism(F, N, Det) :-
 body_determinism_proof(F, N, Proof) :-
     analysis_cache_lookup(det(F, N), Proof), !.
 body_determinism_proof(F, N, Proof) :-
-    catch(b_getval('$det_stack', St), _, St = []),
+    ( nb_current('$det_stack', St) -> true ; St = [] ),
     memberchk(F/N, St), !,
     analysis_make_proof(body(F/N), det, [],
                         [effect(F/N), clause_set(F/N)], Proof).
 body_determinism_proof(F, N, Proof) :-
-    catch(nb_getval(F, Metas0), _, Metas0 = []),
+    ( atom(F), nb_current(F, Metas0) -> true ; Metas0 = [] ),
     include(arity_meta(N), Metas0, Metas),
     ( Metas == []
       -> ( builtin_flat_cardinality(F, N, Det0)
            -> Det = Det0 ; Det = unspecified ),
          analysis_make_proof(body(F/N), Det, [],
                              [effect(F/N), decl(F/N)], Proof)
-    ; catch(b_getval('$det_stack', St), _, St = []),
+    ; ( nb_current('$det_stack', St) -> true ; St = [] ),
       setup_call_cleanup(
           b_setval('$det_stack', [F/N|St]),
           with_compiling_caller(F, N,
@@ -769,7 +744,7 @@ bind_meta_param(Arg, T) :- ignore(catch(bind_pattern_typed(Arg, T), _, true)).
 arity_meta(N, Meta) :- Meta = fun_meta(Args, _, _), length(Args, N).
 
 %The stored clause metadata of F/N; fails when it has no clauses:
-fun_metas(F, N, Metas) :- catch(nb_getval(F, Metas0), _, fail),
+fun_metas(F, N, Metas) :- atom(F), nb_current(F, Metas0),
                           include(arity_meta(N), Metas0, Metas),
                           Metas \== [].
 
