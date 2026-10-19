@@ -277,9 +277,13 @@ check_call_arg(Mode, Fun, AV, T, Gs) :- ( var(AV)
                                                -> ( nonvar(T), wildcard_type(T) -> Gs = []  %wildcards carry no knowledge
                                                   ; Mode == declared,
                                                     inference_assumption(AV)
-                                                    -> taint_assumption(AV),
-                                                       type_guard(Fun, AV, T, Gs)
+                                                    -> ( strict_mode(true),
+                                                         type_unify(K, T)
+                                                         -> oracle_arg_check(AV, T, Gs)
+                                                          ; taint_assumption(AV),
+                                                            type_guard(Fun, AV, T, Gs) )
                                                   ; Mode == declared,
+                                                    \+ strict_mode(true),
                                                     nonvar(T), \+ wildcard_type(T),
                                                     type_contains_nested_wildcard(K)
                                                     -> taint_assumption(AV),
