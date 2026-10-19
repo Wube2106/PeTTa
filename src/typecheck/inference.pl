@@ -109,6 +109,11 @@ ctor_pattern_field_types(Arg) :- ( functional_pattern_application(Arg, _, _)
                                             error(literal_type_mismatch(_, _), typecheck), true)
                                     ; true ).
 
+inference_assumption(AV) :-
+    catch(b_getval('$assumptions', Pairs), _, fail),
+    member(a(P, _), Pairs),
+    P == AV.
+
 taint_assumption(AV) :- ( catch(b_getval('$assumptions', Pairs), _, fail),
                           member(a(P, _), Pairs), P == AV
                           -> catch(b_getval('$assump_taint', Ts), _, Ts = []),

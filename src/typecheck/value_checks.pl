@@ -275,6 +275,15 @@ arg_statically_ok(AV, T) :- \+ \+ ( var(AV) -> ( known_singleton(AV, K) -> type_
 check_call_arg(Mode, Fun, AV, T, Gs) :- ( var(AV)
                                           -> ( known_singleton(AV, K)
                                                -> ( nonvar(T), wildcard_type(T) -> Gs = []  %wildcards carry no knowledge
+                                                  ; Mode == declared,
+                                                    inference_assumption(AV)
+                                                    -> taint_assumption(AV),
+                                                       type_guard(Fun, AV, T, Gs)
+                                                  ; Mode == declared,
+                                                    nonvar(T), \+ wildcard_type(T),
+                                                    type_contains_nested_wildcard(K)
+                                                    -> taint_assumption(AV),
+                                                       type_guard(Fun, AV, T, Gs)
                                                   ; type_unify(K, T) -> oracle_arg_check(AV, T, Gs)
                                                   %brands are erased at runtime, so a
                                                   %conflicting brand on a promised type
@@ -298,6 +307,14 @@ check_call_arg(Mode, Fun, AV, T, Gs) :- ( var(AV)
                                                   ; type_guard(Fun, AV, T, Gs) )
                                           ; Mode == inferred -> Gs = []
                                           ; type_guard(Fun, AV, T, Gs) ) ).
+
+%A structured known type can still contain unknown components. A declared
+%structured requirement must be checked at runtime in that case; successful
+%unification through a nested wildcard is not proof that the value conforms.
+type_contains_nested_wildcard(T) :-
+    is_list(T),
+    member(E, T),
+    ( wildcard_type(E) ; type_contains_nested_wildcard(E) ), !.
 
 %Open structured types (e.g. (List $a)) still guard their outer shape; only a
 %fully unconstrained type variable needs no check at all:
